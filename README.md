@@ -1,13 +1,19 @@
-# Button-triggered playback
+# MAL trigger firmware
 
-Firmware for a Raspberry Pi Pico (RP2040) based board. A visitor presses a button and a timed output signal runs. For now the status LED stands in for real playback (i.e. BrightSigns and sound-modules). Presses during playback are ignored, and a held button triggers only once.
+Firmware for the SparkFun Pro Micro RP2040. A visitor presses a button and a timed output signal runs. For now the status LED stands in for real playback (BrightSign and/or sound module). Presses during playback are ignored, and a held button triggers only once.
+
+**Status:** the TinyUSB device stack is linked and configured but not started yet. USB HID keyboard output (to trigger the BrightSign LS5) is in progress.
 
 ## Hardware
 
-| Signal     | GPIO | Notes                                                                                                                                    |
-| ---------- | ---- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| Button     | 22   | Active low: button to GND with an external pull-up. The internal pulls are disabled in firmware.                                         |
-| Status LED | 25   | The Pico's onboard LED. On the Pro Micro, GPIO 25 drives the WS2812, so wire an external LED to another pin and change `STATUS_LED_PIN`. |
+Board: SparkFun Pro Micro RP2040 (`PICO_BOARD=sparkfun_promicro`).
+
+| Signal     | GPIO       | Notes                                                                                            |
+| ---------- | ---------- | ------------------------------------------------------------------------------------------------ |
+| Button     | 26 (A0)    | Active low: button to GND with an external pull-up. The internal pulls are disabled in firmware. |
+| Status LED | 4          | External LED. The board has no plain LED: GPIO 25 drives its WS2812.                             |
+| Debug UART | 0 TX, 1 RX | `printf` output, 115200 baud, through a USB-to-UART adapter                                     |
+| USB-C      |            | Reserved for the USB HID keyboard. There is no USB serial port.                                  |
 
 ## How it works
 
@@ -50,10 +56,12 @@ Every change in the raw reading restarts a stopwatch, so bounces are never accep
 
 ## Files
 
-| File              | Contents                                                                                                                 |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `src/main.cpp`    | Pin setup, hardware helpers and the playback state machine                                                               |
-| `src/debouncer.h` | The `Debouncer` class. Pure logic with no Pico SDK calls, so it can be reused for other inputs and tested on a computer. |
+| File                | Contents                                                                                                                 |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `src/main.cpp`      | Pin setup, hardware helpers and the playback state machine                                                               |
+| `src/debouncer.h`   | The `Debouncer` class. Pure logic with no Pico SDK calls, so it can be reused for other inputs and tested on a computer. |
+| `src/tusb_config.h` | TinyUSB's compile-time configuration: device mode, one HID keyboard interface                                            |
+| `CMakeLists.txt`    | Build configuration, in numbered sections that follow the configure → compile → link flow                                |
 
 ## Configuration
 
@@ -61,17 +69,39 @@ Every change in the raw reading restarts a stopwatch, so bounces are never accep
 | ------------------------------ | ------- | ------------------------------------------------------------- |
 | `DEBOUNCE_MS`                  | 20      | How long the raw reading must be steady before it is accepted |
 | `PLAYBACK_DURATION_MS`         | 5000    | How long each playback lasts                                  |
-| `BUTTON_PIN`, `STATUS_LED_PIN` | 22, 25  | GPIO numbers                                                  |
+| `BUTTON_PIN`, `STATUS_LED_PIN` | 26, 4   | GPIO numbers                                                  |
 
-## Build and flash
+## Build
 
 ```zsh
-cmake -S . -B build/pico -G Ninja -DPICO_BOARD=pico
-cmake --build build/pico
-picotool load -f build/pico/<project>.uf2
+cmake -S . -B build -G Ninja -DPICO_BOARD=sparkfun_promicro
+cmake --build build
 ```
 
-The `.uf2` is named after the project in `CMakeLists.txt`. `picotool load -f` only works when the firmware already on the board has USB enabled; for the first upload, hold BOOTSEL while plugging in.
+The `.uf2` is named after the project in `CMakeLists.txt`: `build/MAL-trigger-firmware.uf2`.
+
+## Flash
+
+The USB port belongs to the HID keyboard, so this firmware has no USB serial port, and `picotool load -f` can't reboot the board for you. Put it into BOOTSEL mode by hand:
+
+1. Hold **BOOT**, tap **RESET**, then release **BOOT**. (Or hold **BOOT** while plugging in USB.)
+2. Load and run:
+
+```zsh
+picotool load -x build/MAL-trigger-firmware.uf2
+```
+
+`-x` starts the new firmware right after loading. To check which firmware is on a board, put it in BOOTSEL mode and run `picotool info`: it shows the program name and version set in `CMakeLists.txt`.
+
+## Debug output
+
+`printf` goes to UART0 only. Connect a 3.3 V USB-to-UART adapter (adapter RX → GPIO 0 TX, adapter TX → GPIO 1 RX, GND → GND), then:
+
+```zsh
+tio -b 115200 /dev/tty.usbserial-*
+```
+
+The device name depends on the adapter; `ls /dev/tty.*` lists the options.
 
 ## Tests to run after changes
 
