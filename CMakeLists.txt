@@ -12,7 +12,7 @@ include($ENV{PICO_SDK_PATH}/external/pico_sdk_import.cmake)
 # ----- PROJECT CONFIGURATION AND SDK SETUP -----
 
 # define project name, enabled languages and their standards
-project(usb-hid-trigger-controller C CXX ASM)
+project(MAL-trigger-firmware VERSION 0.1.0 LANGUAGES C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 
