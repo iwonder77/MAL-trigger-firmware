@@ -19,6 +19,7 @@
 #include "tusb.h"
 
 #include "debouncer.h"
+#include "key_tap.h"
 
 // ---------- CONFIGURATION -------------------------
 constexpr uint8_t STATUS_LED_PIN = 4; // on the Pro Micro, GPIO25 drives a
@@ -53,6 +54,12 @@ static void set_led(bool on) { gpio_put(STATUS_LED_PIN, on); }
 static bool button_is_pressed() { return !gpio_get(BUTTON_PIN); }
 
 static uint32_t now_ms() { return to_ms_since_boot(get_absolute_time()); }
+
+// key sent to the BrightSign on each press
+// HID_KEY_A comes from TinyUSB (other keys follow the same pattern, e.g.
+// HID_KEY_1 or HID_KEY_SPACE or HID_KEY_B and so on)
+// set up BrightSign presentation and event to match whichever key you pick here
+constexpr uint8_t TRIGGER_KEY = HID_KEY_A;
 // --------------------------------------------------
 
 // ---------- USB CALLBACKS -------------------------
@@ -108,8 +115,12 @@ int main(void) {
   Debouncer button(DEBOUNCE_MS);
   button.reset(button_is_pressed(), now_ms());
 
+  KeyTap key_tap;
+
   while (true) {
-    tud_task(); // let TinyUSB handle anything the computer asked for
+    tud_task();       // let TinyUSB handle anything the computer asked for
+    key_tap.update(); // sends the next half of a tap (if one is waiting)
+
     // read the time once on every loop, so every decision in this pass uses
     // the same value
     const uint32_t now = now_ms();
@@ -124,6 +135,13 @@ int main(void) {
         state = PlaybackState::PLAYING;
         playback_started_at_ms = now;
         set_led(true);
+        // request a tap (the first half of one, i.e. the press) when playback
+        // begins here:
+        if (!key_tap.request(TRIGGER_KEY)) {
+          printf("USB not ready, key not sent\n");
+          // notice how a board that isn't connected to a computer still runs
+          // the LED playback, but no key tap goes through and we log why
+        }
         printf("button pressed! starting playback\n");
       }
       break;
