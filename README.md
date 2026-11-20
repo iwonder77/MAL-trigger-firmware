@@ -2,7 +2,7 @@
 
 Firmware for the SparkFun Pro Micro RP2040. A visitor presses a button and a timed output signal runs. For now the status LED stands in for real playback (BrightSign and/or sound module). Presses during playback are ignored, and a held button triggers only once.
 
-**Status:** the TinyUSB device stack is linked and configured but not started yet. USB HID keyboard output (to trigger the BrightSign LS5) is in progress.
+**Status:** the board enumerates as a USB HID keyboard ("MAL Trigger Controller"), but doesn't send key presses yet. Sending a key on each button press (to trigger the BrightSign LS5) is next.
 
 ## Hardware
 
@@ -61,6 +61,7 @@ Every change in the raw reading restarts a stopwatch, so bounces are never accep
 | `src/main.cpp`      | Pin setup, hardware helpers and the playback state machine                                                               |
 | `src/debouncer.h`   | The `Debouncer` class. Pure logic with no Pico SDK calls, so it can be reused for other inputs and tested on a computer. |
 | `src/tusb_config.h` | TinyUSB's compile-time configuration: device mode, one HID keyboard interface                                            |
+| `src/usb_descriptors.c` | What the board tells the computer when plugged in: IDs, keyboard layout, names and serial number                     |
 | `CMakeLists.txt`    | Build configuration, in numbered sections that follow the configure → compile → link flow                                |
 
 ## Configuration

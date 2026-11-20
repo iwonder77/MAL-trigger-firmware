@@ -16,6 +16,7 @@
 #include <cstdio>
 
 #include "pico/stdlib.h"
+#include "tusb.h"
 
 #include "debouncer.h"
 
@@ -28,6 +29,8 @@ constexpr uint8_t BUTTON_PIN =
 
 constexpr uint32_t DEBOUNCE_MS = 20;
 constexpr uint32_t PLAYBACK_DURATION_MS = 5000;
+
+constexpr uint8_t USB_RHPORT = 0; // the RP2040 has only one USB port, number 0
 // --------------------------------------------------
 
 // ---------- HARDWARE ------------------------------
@@ -52,14 +55,52 @@ static bool button_is_pressed() { return !gpio_get(BUTTON_PIN); }
 static uint32_t now_ms() { return to_ms_since_boot(get_absolute_time()); }
 // --------------------------------------------------
 
+// ---------- USB CALLBACKS -------------------------
+// TinyUSB calls these by name from inside tud_task(). They must NOT be `static`
+// or else TinyUSB can't find them.
+
+// the computer accepted us as a keyboard
+void tud_mount_cb(void) { printf("USB mounted\n"); }
+
+// the computer disconnected us
+void tud_umount_cb(void) { printf("USB unmounted\n"); }
+
+// the computer asks for our current key state; we don't need to answer
+uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id,
+                               hid_report_type_t report_type, uint8_t *buffer,
+                               uint16_t reqLen) {
+  (void)instance;
+  (void)report_id;
+  (void)report_type;
+  (void)buffer;
+  (void)reqLen;
+  return 0;
+}
+
+// the computer sends us data, like "Caps Lock is on"; we have no lock LEDs
+void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
+                           hid_report_type_t report_type, uint8_t const *buffer,
+                           uint16_t bufsize) {
+  (void)instance;
+  (void)report_id;
+  (void)report_type;
+  (void)buffer;
+  (void)bufsize;
+}
+
 enum class PlaybackState : uint8_t { IDLE, PLAYING };
 
 int main(void) {
-  // begins UART and USB serial for printf(), keep USB enabled even if all the
-  // logging is removed since it is what lets `picotool load -f` reboot the
-  // board into BOOTSEL mode for reuploading firmware
-  stdio_init_all();
+  stdio_init_all(); // start UART for printf()
+
   init_pins();
+
+  // init device stack on configured roothub port
+  const tusb_rhport_init_t usb_settings = {.role = TUSB_ROLE_DEVICE,
+                                           .speed = TUSB_SPEED_FULL};
+  if (!tusb_init(USB_RHPORT, &usb_settings)) {
+    printf("USB failed to start\n");
+  }
 
   PlaybackState state = PlaybackState::IDLE;
   uint32_t playback_started_at_ms = 0;
@@ -68,6 +109,7 @@ int main(void) {
   button.reset(button_is_pressed(), now_ms());
 
   while (true) {
+    tud_task(); // let TinyUSB handle anything the computer asked for
     // read the time once on every loop, so every decision in this pass uses
     // the same value
     const uint32_t now = now_ms();

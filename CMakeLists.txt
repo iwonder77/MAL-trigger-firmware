@@ -90,6 +90,7 @@ pico_sdk_init()
 #     #include and the include paths in 4b.
 add_executable(${PROJECT_NAME}
   src/main.cpp
+  src/usb_descriptors.c
 )
 
 # 4b. Add src/ to the header search path (-I) of EVERY file compiled into this
@@ -109,9 +110,11 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 #     tinyusb_device  the TinyUSB device stack, configured by src/tusb_config.h.
 #                     Also defines LIB_TINYUSB_DEVICE=1, which tells the SDK
 #                     that this application owns the USB port.
+#     pico_unique_id  For the chip's unique ID, used as the USB serial number
 target_link_libraries(${PROJECT_NAME} PRIVATE
   pico_stdlib
   tinyusb_device
+  pico_unique_id
 )
 
 # 4d. Route printf() to UART0 (GPIO0 TX / GPIO1 RX, from the board header).
