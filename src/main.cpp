@@ -1,16 +1,30 @@
 /**
  * @file main.cpp
- * @brief debounced button input to trigger output (LED) with timed lockout
+ * @brief Guest button -> BrightSign key press + sound module trigger, with
+ *        presses locked out while the sound plays.
  *
- * A debounced button press starts a timed "playback" output which runs for
- * PLAYBACK_DURATION_MS. For now the status LED stands in for the real trigger
- * outputs (BrightSign and/or sound module). Presses during playback are
- * ignored (no BUSY line implemented here) and a held button triggeres only
- * once: it has to be released and pressed again (rearm).
+ * A debounced button press starts one playback:
+ *  - a USB keyboard tap (TRIGGER_KEY) tells the BrightSign LS5 to play its
+ *    video
+ *  - SOUND_TRIGGER_PIN starts the DY-HV20T sound. It goes through a BC547, so
+ *    GPIO HIGH = the module's trigger pin LOW. The trigger is held until the
+ *    module confirms it started (BUSY goes LOW): a handshake, not a fixed pulse
+ *  - the firmware switches the LED on LED_TRIGGER_PIN on and off together with
+ *    SOUND_TRIGGER_PIN, to visualize the trigger pulse
  *
- * Every pass of the main loop follows the same order, take in the current
- * time and raw button reading, pass it to the debouncer, and run the state
- * machine based on the event returned.
+ * Every exhibit pairs the BrightSign with the sound module, so the module's
+ * BUSY line decides when a playback is over:
+ *  - STARTING: trigger held until BUSY goes LOW, or BUSY_START_TIMEOUT_MS
+ *  - PLAYING:  until BUSY goes HIGH again, or AUDIO_MAX_DURATION_MS
+ *  - COOLDOWN: a short COOLDOWN_PERIOD_MS before the button rearms
+ * Presses in any of these states are logged and ignored. Every wait on the
+ * module has a time limit, so a missing or faulty module can't lock up the
+ * exhibit. A held button triggers only once: it has to be released and
+ * pressed again.
+ *
+ * Every pass of the main loop runs in the same order and never waits: service
+ * USB (tud_task, key tap), read the clock and button, debounce, then run the
+ * state machine on the result.
  */
 #include <cstdint>
 #include <cstdio>
@@ -22,22 +36,46 @@
 #include "key_tap.h"
 
 // ---------- CONFIGURATION -------------------------
-constexpr uint8_t STATUS_LED_PIN = 4; // on the Pro Micro, GPIO25 drives a
-                                      // WS2812, use an external LED on this pin
+constexpr uint8_t LED_TRIGGER_PIN =
+    2; // external LED used to visualize trigger pulses
+constexpr uint8_t SOUND_TRIGGER_PIN =
+    3; // drives base current through BJT to pull DY-HV20T's TRIG0 pin LOW
+constexpr uint8_t SOUND_BUSY_PIN = 4; // on the DY-HV20T, this pin is HIGH when
+                                      // idle and LOW when a sound is playing
+
 constexpr uint8_t BUTTON_PIN =
     26; // Buttons are ACTIVE LOW, external pull-up
         // circuit is assumed here (pin silkscreen label is A0)
 
 constexpr uint32_t DEBOUNCE_MS = 20;
-constexpr uint32_t PLAYBACK_DURATION_MS = 5000;
+constexpr uint32_t BUSY_START_TIMEOUT_MS = 1000;
+constexpr uint32_t AUDIO_MAX_DURATION_MS = 7000;
+constexpr uint32_t COOLDOWN_PERIOD_MS = 100;
 
 constexpr uint8_t USB_RHPORT = 0; // the RP2040 has only one USB port, number 0
+
+// key sent to the BrightSign on each press
+// HID_KEY_A comes from TinyUSB (other keys follow the same pattern, e.g.
+// HID_KEY_1 or HID_KEY_SPACE or HID_KEY_B and so on)
+// set up BrightSign presentation and event to match whichever key you pick here
+constexpr uint8_t TRIGGER_KEY = HID_KEY_A;
+
 // --------------------------------------------------
 
 // ---------- HARDWARE ------------------------------
 static void init_pins() {
-  gpio_init(STATUS_LED_PIN);
-  gpio_set_dir(STATUS_LED_PIN, GPIO_OUT);
+  gpio_init(LED_TRIGGER_PIN);
+  gpio_set_dir(LED_TRIGGER_PIN, GPIO_OUT);
+  gpio_init(SOUND_TRIGGER_PIN);
+  gpio_set_dir(SOUND_TRIGGER_PIN, GPIO_OUT);
+
+  gpio_init(SOUND_BUSY_PIN);
+  gpio_set_dir(SOUND_BUSY_PIN, GPIO_IN);
+  // deliberately set this pin with weak internal pull down
+  // in case sound module is mis-wired or unpowered or missing, the BUSY line
+  // will always read low (that'll just lock presses out for
+  // AUDIO_MAX_DURATION_MS)
+  gpio_pull_down(SOUND_BUSY_PIN);
 
   gpio_init(BUTTON_PIN);
   gpio_set_dir(BUTTON_PIN, GPIO_IN);
@@ -47,19 +85,17 @@ static void init_pins() {
   gpio_disable_pulls(BUTTON_PIN);
 }
 
-static void set_led(bool on) { gpio_put(STATUS_LED_PIN, on); }
+static void set_led(bool on) { gpio_put(LED_TRIGGER_PIN, on); }
+static void trigger_sound(bool on) { gpio_put(SOUND_TRIGGER_PIN, on); }
 
 // the button reads 0 (LOW) when pressed, inverting it here allows the
 // rest of the code to treat TRUE as "pressed."
 static bool button_is_pressed() { return !gpio_get(BUTTON_PIN); }
 
-static uint32_t now_ms() { return to_ms_since_boot(get_absolute_time()); }
+// similar to the button func above, sound module reads LOW when BUSY
+static bool is_busy() { return !gpio_get(SOUND_BUSY_PIN); }
 
-// key sent to the BrightSign on each press
-// HID_KEY_A comes from TinyUSB (other keys follow the same pattern, e.g.
-// HID_KEY_1 or HID_KEY_SPACE or HID_KEY_B and so on)
-// set up BrightSign presentation and event to match whichever key you pick here
-constexpr uint8_t TRIGGER_KEY = HID_KEY_A;
+static uint32_t now_ms() { return to_ms_since_boot(get_absolute_time()); }
 // --------------------------------------------------
 
 // ---------- USB CALLBACKS -------------------------
@@ -95,7 +131,7 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id,
   (void)bufsize;
 }
 
-enum class PlaybackState : uint8_t { IDLE, PLAYING };
+enum class PlaybackState : uint8_t { IDLE, STARTING, PLAYING, COOLDOWN };
 
 int main(void) {
   stdio_init_all(); // start UART for printf()
@@ -111,6 +147,7 @@ int main(void) {
 
   PlaybackState state = PlaybackState::IDLE;
   uint32_t playback_started_at_ms = 0;
+  uint32_t playback_ended_at_ms = 0;
 
   Debouncer button(DEBOUNCE_MS);
   button.reset(button_is_pressed(), now_ms());
@@ -132,9 +169,10 @@ int main(void) {
     switch (state) {
     case PlaybackState::IDLE:
       if (press_event) {
-        state = PlaybackState::PLAYING;
+        state = PlaybackState::STARTING;
         playback_started_at_ms = now;
         set_led(true);
+        trigger_sound(true);
         // request a tap (the first half of one, i.e. the press) when playback
         // begins here:
         if (!key_tap.request(TRIGGER_KEY)) {
@@ -145,15 +183,53 @@ int main(void) {
         printf("button pressed! starting playback\n");
       }
       break;
-    case PlaybackState::PLAYING:
-      // call update only for logging, presses are ignored and not acted upon
+
+    case PlaybackState::STARTING:
+      // consume press events only for logging, do nothing with them here
       if (press_event) {
         printf("button pressed during playback - IGNORED\n");
       }
-      if (now - playback_started_at_ms > PLAYBACK_DURATION_MS) {
-        state = PlaybackState::IDLE;
+      if (is_busy()) {
+        // end trigger lines' pulse once module asserts as BUSY
+        state = PlaybackState::PLAYING;
         set_led(false);
+        trigger_sound(false);
+      }
+      // safety timeout: if playback doesn't begin for this long, log it,
+      // end the pulses and force an exit
+      if (now - playback_started_at_ms > BUSY_START_TIMEOUT_MS) {
+        printf("WARNING: playback never began, forcing COOLDOWN\n");
+        state = PlaybackState::COOLDOWN;
+        set_led(false);
+        trigger_sound(false);
+        playback_ended_at_ms = now;
+        break;
+      }
+      break;
+    case PlaybackState::PLAYING:
+      // consume press events only for logging, do nothing with them here
+      if (press_event) {
+        printf("button pressed during playback - IGNORED\n");
+      }
+      // safety timeout: if playback exceeds maximum duration, force an exit
+      if (now - playback_started_at_ms > AUDIO_MAX_DURATION_MS) {
+        printf("WARNING: BUSY line timed out, forcing COOLDOWN\n");
+        state = PlaybackState::COOLDOWN;
+        playback_ended_at_ms = now;
+        break;
+      }
+      if (!is_busy()) {
+        // only move on to brief cooldown period until playback ends, remember
+        // to take timestamp too
+        state = PlaybackState::COOLDOWN;
         printf("playback ended\n");
+        playback_ended_at_ms = now;
+      }
+      break;
+    case PlaybackState::COOLDOWN:
+      if (now - playback_ended_at_ms >= COOLDOWN_PERIOD_MS) {
+        state = PlaybackState::IDLE;
+        printf("cooldown period ended\n");
       }
       break;
     }
